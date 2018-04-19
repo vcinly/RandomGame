@@ -1,17 +1,15 @@
 pragma solidity ^0.4.20;
 
 contract RandomGame {
-  uint256[] public result;
+  uint256[] public results;
   address public banker;
   uint256 public shares = 100;
   uint256 public sharePrice = 10 finney;
   uint256 public round = 0;
-  uint256 public headFillRound = 0;
-  uint256 public tailFillRound = 0;
+  uint256 public gasPrice = 0.001 szabo;
 
-  function RandomGame () public {
+  constructor () public {
     banker = msg.sender;
-    oraclize_setProof(proofType_Ledger);
   }
 
   modifier onlyBanker() {
@@ -19,112 +17,27 @@ contract RandomGame {
     _;
   }
 
+  struct Chip {
+    address owner;
+    uint256 share;
+  }
+
   struct Sheet {
-    uint256 headShare;
-    uint256 tailShare;
-    mapping(address => uint256) head;
-    mapping(address => uint256) tail;
+    uint256 sharePrice;
+    uint256 totalHeadShare;
+    uint256 totalTailShare;
+    uint256 leftHeadShare;
+    uint256 leftTailShare;
+    Chip[] head;
+    Chip[] tail;
   }
 
   Sheet[] sheets;
 
-  event newRandomNumber_bytes(bytes);
-  event newRandomNumber_uint(uint);
-
-  function betting(uint side) external payable {
-    require(side == 0 || side == 1);
-    uint betShare = msg.value / sharePrice;
-
-    _betting(side, betShare, msg.sender);
-  }
-
-  function _betting(uint side, uint betShare, address sender) internal {
-    if (betShare > 0) {
-      side == 0 ? betHead(betShare, sender) : betTail(betShare, sender);
-    }
-  }
-
-  function betHead(uint _betShare, address _sender) internal {
-    if (sheets.length > headFillRound) {
-      Sheet storage _sheet = sheets[headFillRound];
-      if (_sheet.headShare > 0) {
-        if (_sheet.headShare > _betShare) {
-          _sheet.headShare -= _betShare;
-          _sheet.head[_sender] += _betShare;
-        } else {
-          _sheet.head[_sender] += _sheet.headShare;
-          _betShare -= _sheet.headShare;
-          _sheet.headShare = 0;
-          headFillRound++;
-          _betting(0, _betShare, _sender);
-        }
-      } else {
-        headFillRound++;
-        _betting(0, _betShare, _sender);
-      }
-    } else {
-      sheets[headFillRound] = Sheet(shares, shares);
-      _betting(0, _betShare, _sender);
-    }
-  }
-
-  function betTail(uint _betShare, address _sender) internal {
-    if (sheets.length > tailFillRound) {
-      Sheet storage _sheet = sheets[tailFillRound];
-      if (_sheet.tailShare > 0) {
-        if (_sheet.tailShare > _betShare) {
-          _sheet.tailShare -= _betShare;
-          _sheet.tail[_sender] += _betShare;
-        } else {
-          _sheet.tail[_sender] += _sheet.tailShare;
-          _betShare -= _sheet.tailShare;
-          _sheet.tailShare = 0;
-          tailFillRound++;
-          _betting(0, _betShare, _sender);
-        }
-      } else {
-        tailFillRound++;
-        _betting(0, _betShare, _sender);
-      }
-    } else {
-      sheets[tailFillRound] = Sheet(shares, shares);
-      _betting(0, _betShare, _sender);
-    }
-  }
-
-  function getSheetShare(uint _round)
-    external
-    view
-    returns (
-             uint256 headShare,
-             uint256 tailShare
-  ) {
-    Sheet memory s = sheets[_round];
-    headShare = s.headShare;
-    tailShare = s.tailShare;
-  }
-
-  function checkRound() public {
-    Sheet memory _sheet = sheets[round];
-    if (result.length < round + 1) {
-      if (_sheet.headShare == 0 && _sheet.tailShare == 0) {
-        draw(round);
-      }
-    }
-  }
-
-  function draw(uint _round) public external {
-    uint256 rand = random(2, msg.sender);
-    result.push(rand)
-    reward(_round, rand);
-  }
-
-  function reward(uint round, uint side) {
-    Sheet memory _sheet = sheets[round];
-  }
+  event newRandomNumber(uint);
 
   function maxRandom(address _address) public returns (uint256 randomNumber) {
-    _seed = uint256(keccak256(
+    uint _seed = uint256(keccak256(
                               _address,
                               block.blockhash(block.number - 1),
                               block.coinbase,
@@ -137,4 +50,90 @@ contract RandomGame {
     return maxRandom(seed) % upper;
   }
 
+  function checkLeftShare(uint side) internal returns (uint leftShare) {
+    if (sheets[round].sharePrice == 0) {
+      sheets[round] = Sheet({
+          sharePrice: sharePrice, 
+          totalHeadShare: shares, 
+          totalTailShare: shares, 
+          leftHeadShare:shares, 
+          leftTailShare:shares,
+          head: new Chip[](0),
+          tail: new Chip[](0)
+      });
+    }
+
+    Sheet memory _sheet = sheets[round];
+    if (side == 0) {
+      leftShare = _sheet.leftHeadShare;
+    } else {
+      leftShare = _sheet.leftTailShare;
+    }
+  }
+
+  function checkBetShareAndRefund(uint _value, uint _leftShare, address _sender) internal returns(uint _betShare) {
+    uint maxShare = _value / sharePrice;
+    if (maxShare <= _leftShare) {
+      _betShare = maxShare;
+    } else {
+      _betShare = _leftShare;
+      uint refundFee = _value - (_leftShare * sharePrice);
+      _sender.transfer(refundFee);
+    }
+  }
+
+
+  function betting(uint side) external payable {
+    require(side == 0 || side == 1);
+    require(msg.value >= sharePrice);
+
+    uint leftShare = checkLeftShare(side);
+
+    require(leftShare > 0);
+
+    uint betShare = checkBetShareAndRefund(msg.value, leftShare, msg.sender);
+
+    _betting(side, betShare, msg.sender);
+
+    checkAndDraw(msg.sender);
+  }
+
+
+  function _betting(uint _side, uint _betShare, address _sender) internal {
+    Sheet storage _sheet = sheets[round];
+
+    if (_side == 0) {
+      _sheet.leftHeadShare -= _betShare;
+      _sheet.head.push(Chip(_sender, _betShare));
+    } else {
+      _sheet.leftTailShare -= _betShare;
+      _sheet.tail.push(Chip(_sender, _betShare));
+    }
+  }
+
+  function checkAndDraw(address _sender) internal {
+    Sheet memory _sheet = sheets[round];
+    if (_sheet.leftHeadShare == 0 && _sheet.leftTailShare == 0) {
+      uint256 rand = random(2, _sender);
+      results.push(rand);
+      reward(rand, _sender);
+      round++;
+    }
+  }
+
+  function reward(uint _rand, address _sender) internal {
+    Sheet memory _sheet = sheets[round];
+    Chip[] memory winners = _rand == 0 ? _sheet.head : _sheet.tail;
+    uint totalShare = _rand == 0 ? _sheet.totalHeadShare : _sheet.totalTailShare;
+
+    uint transferFee = 21000 * winners.length * gasPrice;
+    uint totalBonus = ((_sheet.totalHeadShare + _sheet.totalTailShare) * _sheet.sharePrice * 98 / 100) - transferFee;
+
+    for (uint i = 0; i < winners.length; i++) {
+      Chip memory winner = winners[i];
+      uint bonus = totalBonus / totalShare * winner.share;
+      if (winner.owner == _sender) { bonus += transferFee; }
+      winner.owner.transfer(bonus);
+    }
+  }
 }
